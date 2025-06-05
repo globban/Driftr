@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Drifting Car</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <style>
+    body {
+      overflow: hidden;
+      background-color: #000;
+    }
+    #controls {
+      position: absolute;
+      top: 50px;
+      left: 50px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 10px;
+      border-radius: 8px;
+      color: white;
+      font-family: sans-serif;
+      z-index: 10000;
+    }
+
+    #controls label {
+      display: block;
+      margin-bottom: 8px;
+    }
+
+    #loadingScreen {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: #111;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 999999;
+      font-family: sans-serif;
+    }
+
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 6px solid rgba(255, 255, 255, 0.2);
+      border-top: 6px solid #fff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 20px;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+  </style>
+  <body>
+    <div id="loadingScreen">
+      <div class="spinner"></div>
+      <p>Loading...</p>
+    </div>
+
+    <canvas id="game"></canvas>
+    <div id="controls">
+      <label>
+        Car Hue:
+        <input type="range" id="carHue" min="0" max="360" value="20" />
+        <span id="hueValue">20</span>
+      </label>
+      <label>
+        Friction:
+        <input
+          type="range"
+          id="frictionSlider"
+          min="0.90"
+          max="1.00"
+          step="0.001"
+          value="0.995"
+        />
+        <span id="frictionValue">0.995</span>
+      </label>
+
+      <label>
+        <input type="checkbox" id="tireToggle" checked />
+        Show Tire Marks
+      </label>
+      <button id="saveButton">Save</button>
+    </div>
+
+    <!-- Load Socket.IO and initialize socket -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      const socket = io();
+    </script>
+
+    <script>
+      // Setup canvas, context, etc.
+      let showSkidMarks = true;
+
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+      const isMobile = false;
+      let dpr = 1;
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+      canvas.style.width = window.innerWidth + "px";
+      canvas.style.height = window.innerHeight + "px";
+      ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset any scaling
+      ctx.scale(dpr, dpr);
+
+      // Handle keyboard input
+      const keys = {};
+      document.addEventListener("keydown", (e) => (keys[e.key] = true));
+      document.addEventListener("keyup", (e) => (keys[e.key] = false));
+
+      // Mobile-specific variables
+      let mobileMode = false;
+      let mobileSteer = 0;
+      canvas.addEventListener("touchstart", (e) => {
+        mobileMode = true;
+        const touch = e.touches[0];
+        mobileSteer = touch.clientX < window.innerWidth / 2 ? -1 : 1;
+      });
+      canvas.addEventListener("touchmove", (e) => {
+        const touch = e.touches[0];
+        mobileSteer = touch.clientX < window.innerWidth / 2 ? -1 : 1;
+      });
+      canvas.addEventListener("touchend", (e) => {
+        mobileSteer = 0;
+      });
+
+      // ----- Car and Physics -----
+      const car = {
+        x: 1600, // Center of your 16000x16000 world
+        y: 300,
+        width: 40,
+        height: 20,
+        angle: 0,
+        velocityX: 0,
+        velocityY: 0,
+        acceleration: 400, // reduced for smoother behavior
+        friction: 0.995,
+        driftFactor: 1,
+        gripFactor: 1.3,
+        maxSpeed: 500,
+        lateralFriction: 0.99,
+      };
+
+      // Car hue control
+      let customCarHue = localStorage.getItem("carHue") || 20;
+      let customCarColor = `hsl(${customCarHue}, 80%, 50%)`;
+      const carHueSlider = document.getElementById("carHue");
+      const hueValueDisplay = document.getElementById("hueValue");
+      carHueSlider.value = customCarHue;
+      hueValueDisplay.textContent = customCarHue;
+      carHueSlider.addEventListener("input", (e) => {
+        customCarHue = e.target.value;
+        hueValueDisplay.textContent = customCarHue;
+        customCarColor = `hsl(${customCarHue}, 80%, 50%)`;
+      });
+
+      // Friction control
+      const frictionSlider = document.getElementById("frictionSlider");
+      const frictionValueDisplay = document.getElementById("frictionValue");
+
+      frictionSlider.value = car.friction;
+      frictionValueDisplay.textContent = parseFloat(car.friction).toFixed(3);
+
+      frictionSlider.addEventListener("input", (e) => {
+        car.friction = parseFloat(e.target.value);
+        frictionValueDisplay.textContent = car.friction.toFixed(3);
+      });
+
+      // Load saved friction if available
+      const savedFriction = localStorage.getItem("carFriction");
+      if (savedFriction) {
+        car.friction = parseFloat(savedFriction);
+        frictionSlider.value = car.friction;
+        frictionValueDisplay.textContent = car.friction.toFixed(3);
+      }
+
+      // Save when the user clicks "Save"
+      document.getElementById("saveButton").addEventListener("click", () => {
+        localStorage.setItem("carHue", customCarHue);
+        localStorage.setItem("carFriction", car.friction.toFixed(3));
+      });
+
+      document.getElementById("saveButton").addEventListener("click", () => {
+        localStorage.setItem("carHue", customCarHue);
+      });
+
+      // Tire mark toggle
+      const tireToggle = document.getElementById("tireToggle");
+      tireToggle.checked = showSkidMarks;
+
+      tireToggle.addEventListener("change", () => {
+        Showskidmarks = tireToggle.checked;
+        tireCtx.clearRect(0, 0, tireCanvas.width, tireCanvas.height);
+      });
+
+      let lastTime = performance.now();
+
+      // --- Obstacles ---
+      const obstacles = [
+        // Original obstacles
+        { x: 50, y: 50, width: 200, height: 30 },
+        { x: 300, y: 100, width: 100, height: 80 },
+        { x: 450, y: 50, width: 150, height: 30 },
+        { x: 650, y: 150, width: 200, height: 50 },
+        { x: 900, y: 50, width: 50, height: 200 },
+        { x: 50, y: 300, width: 100, height: 100 },
+        { x: 200, y: 350, width: 250, height: 30 },
+        { x: 500, y: 400, width: 150, height: 50 },
+        { x: 700, y: 350, width: 100, height: 100 },
+        { x: 850, y: 400, width: 200, height: 40 },
+        { x: 1100, y: 200, width: 150, height: 60 },
+        { x: 1000, y: 500, width: 250, height: 40 },
+        { x: 1300, y: 300, width: 150, height: 150 },
+        { x: 1500, y: 100, width: 200, height: 30 },
+        { x: 1700, y: 50, width: 100, height: 100 },
+        { x: 1600, y: 400, width: 200, height: 80 },
+        { x: 1800, y: 250, width: 120, height: 30 },
+        { x: 1900, y: 300, width: 30, height: 200 },
+        { x: 1700, y: 500, width: 150, height: 40 },
+        { x: 2000, y: 100, width: 100, height: 150 },
+        { x: 2100, y: 300, width: 200, height: 30 },
+        { x: 2200, y: 400, width: 150, height: 50 },
+        { x: 800, y: 600, width: 80, height: 30 },
+        { x: 1200, y: 700, width: 100, height: 50 },
+        { x: 1400, y: 650, width: 120, height: 30 },
+        { x: 1600, y: 750, width: 80, height: 30 },
+        { x: 1900, y: 650, width: 150, height: 40 },
+      ];
+
+      function drawObstacles() {
+        ctx.save();
+        ctx.fillStyle = "#555";
+        const buffer = 50; // was 200, now smaller for less overdraw
+        const viewLeft = camera.x - buffer;
+        const viewRight = camera.x + canvas.width / dpr + buffer;
+        const viewTop = camera.y - buffer;
+        const viewBottom = camera.y + canvas.height / dpr + buffer;
+
+        obstacles.forEach((ob) => {
+          if (
+            ob.x + ob.width > viewLeft &&
+            ob.x < viewRight &&
+            ob.y + ob.height > viewTop &&
+            ob.y < viewBottom
+          ) {
+            ctx.fillRect(ob.x - camera.x, ob.y - camera.y, ob.width, ob.height);
+          }
+        });
+        ctx.restore();
+      }
+
+      function clamp(val, min, max) {
+        return Math.max(min, Math.min(max, val));
+      }
+
+      function checkCollision() {
+        const carRadius = Math.hypot(car.width, car.height) / 2;
+        obstacles.forEach((ob) => {
+          const closestX = clamp(car.x, ob.x, ob.x + ob.width);
+          const closestY = clamp(car.y, ob.y, ob.y + ob.height);
+          const distX = car.x - closestX;
+          const distY = car.y - closestY;
+          const distanceSquared = distX * distX + distY * distY;
+          if (distanceSquared < carRadius * carRadius) {
+            const distance = Math.sqrt(distanceSquared) || 1;
+            const nx = distX / distance;
+            const ny = distY / distance;
+            const penetration = carRadius - distance;
+            car.x += nx * penetration;
+            car.y += ny * penetration;
+            let dot = car.velocityX * nx + car.velocityY * ny;
+            car.velocityX -= dot * nx;
+            car.velocityY -= dot * ny;
+          }
+        });
+      }
+
+      // --- New: Check collision with other cars ---
+      function checkCarCollisions() {
+        // Treat each car as a circle of radius based on the car's size.
+        const myRadius = Math.hypot(car.width, car.height) / 2;
+        for (const id in otherPlayers) {
+          const other = otherPlayers[id];
+          const otherRadius = myRadius; // assuming same size for all cars
+          const dx = car.x - other.x;
+          const dy = car.y - other.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < myRadius + otherRadius) {
+            // Calculate overlap and push the local car away by half the overlap distance
+            const overlap = myRadius + otherRadius - dist;
+            const ux = dx / dist;
+            const uy = dy / dist;
+            car.x += ux * (overlap / 2);
+            car.y += uy * (overlap / 2);
+            // Reflect a portion of the velocity along the collision normal
+            const dot = car.velocityX * ux + car.velocityY * uy;
+            car.velocityX -= dot * ux;
+            car.velocityY -= dot * uy;
+          }
+        }
+      }
+
+      // --- Camera Setup ---
+      let camera = { x: 0, y: 0 };
+      function updateCamera() {
+        const lerp = 0.1;
+        const targetX = car.x - canvas.width / 2;
+        const targetY = car.y - canvas.height / 2;
+        camera.x += (targetX - camera.x) * lerp;
+        camera.y += (targetY - camera.y) * lerp;
+      }
+
+      // --- Update Car Physics (Keyboard & Mobile Controls) ---
+      function updateCar(dt) {
+        // Determine throttle and steering.
+        const throttle = mobileMode
+          ? 1
+          : (keys["ArrowUp"] || keys["w"] ? 1 : 0) +
+            (keys["ArrowDown"] || keys["s"] ? -1 : 0);
+        const steer = mobileMode
+          ? mobileSteer
+          : (keys["ArrowLeft"] || keys["a"] ? -1 : 0) +
+            (keys["ArrowRight"] || keys["d"] ? 1 : 0);
+
+        const force = throttle * car.acceleration * dt;
+        car.velocityX += Math.cos(car.angle) * force;
+        car.velocityY += Math.sin(car.angle) * force;
+
+        if (
+          Math.abs(steer) > 0 &&
+          Math.hypot(car.velocityX, car.velocityY) > 5
+        ) {
+          const steerStrength =
+            (steer * car.gripFactor) /
+            Math.max(Math.hypot(car.velocityX, car.velocityY), 50);
+          car.angle +=
+            steerStrength * Math.hypot(car.velocityX, car.velocityY) * dt * 3;
+        }
+
+        // Update position based on velocity
+        car.x += car.velocityX * dt;
+        car.y += car.velocityY * dt;
+        car.x = clamp(car.x, 0, WORLD_WIDTH);
+        car.y = clamp(car.y, 0, WORLD_HEIGHT);
+
+        // Apply friction
+        car.velocityX *= car.friction;
+        car.velocityY *= car.friction;
+
+        checkCollision();
+        checkCarCollisions(); // NEW collision check against other cars
+
+        // Draw tire marks when drifting
+        let vAngle = Math.atan2(car.velocityY, car.velocityX);
+
+        let driftAngle = Math.abs(
+          ((vAngle - car.angle + Math.PI) % (2 * Math.PI)) - Math.PI,
+        );
+
+        // Convert 65 degrees to radians
+        const driftAngleThreshold = (50 * Math.PI) / 180;
+
+        if (driftAngle >= driftAngleThreshold) {
+          drawTireMarks();
+        }
+
+        socket.emit("carUpdate", {
+          x: car.x,
+          y: car.y,
+          angle: car.angle,
+          customCarHue: customCarHue,
+          customCarColor: customCarColor,
+        });
+      }
+
+      let tireFadeCounter = 0;
+
+      // Setup tire marks canvas with a MUCH larger map
+      const WORLD_WIDTH = 3000; // New map width
+      const WORLD_HEIGHT = 1000; // New map height
+      const tireCanvas = document.createElement("canvas");
+      tireCanvas.width = WORLD_WIDTH;
+      tireCanvas.height = WORLD_HEIGHT;
+      const tireCtx = tireCanvas.getContext("2d");
+
+      // --- Draw Tire Marks ---
+      function drawTireMarks() {
+        tireCtx.save();
+        tireCtx.translate(car.x, car.y);
+        tireCtx.rotate(car.angle);
+        const markWidth = 3;
+        const markHeight = 8;
+        const frontLeft = { x: -car.width / 2 + 3, y: -car.height / 2 };
+        const frontRight = {
+          x: car.width / 2 - 3 - markWidth,
+          y: -car.height / 2,
+        };
+        const rearLeft = {
+          x: -car.width / 2 + 3,
+          y: car.height / 2 - markHeight,
+        };
+        const rearRight = {
+          x: car.width / 2 - 3 - markWidth,
+          y: car.height / 2 - markHeight,
+        };
+        tireCtx.fillStyle = "rgba(100, 100, 100, 0.4)";
+        tireCtx.fillRect(frontLeft.x, frontLeft.y, markWidth, markHeight);
+        tireCtx.fillRect(frontRight.x, frontRight.y, markWidth, markHeight);
+        tireCtx.fillRect(rearLeft.x, rearLeft.y, markWidth, markHeight);
+        tireCtx.fillRect(rearRight.x, rearRight.y, markWidth, markHeight);
+        tireCtx.restore();
+      }
+
+      // Car texture and drawing
+      const carTexture = new Image();
+      carTexture.src =
+        "https://cdn.glitch.global/e1c6e0c4-057b-4899-b00b-936487f9f7da/car.png?v=1748610578788";
+
+      // Wait until car image is loaded AND socket connected
+      let carTextureLoaded = false;
+      let socketConnected = false;
+
+      carTexture.onload = () => {
+        carTextureLoaded = true;
+        maybeStartGame();
+      };
+
+      socket.on("connect", () => {
+        socketConnected = true;
+        maybeStartGame();
+      });
+
+      function maybeStartGame() {
+        if (carTextureLoaded && socketConnected) {
+          document.getElementById("loadingScreen").style.display = "none";
+          requestAnimationFrame(loop);
+        }
+      }
+
+      function drawCar() {
+        ctx.save();
+        ctx.translate(car.x - camera.x, car.y - camera.y);
+        ctx.rotate(car.angle);
+        if (carTexture.complete) {
+          ctx.filter = `hue-rotate(${customCarHue}deg)`;
+          ctx.drawImage(
+            carTexture,
+            -car.width / 2,
+            -car.height / 2,
+            car.width,
+            car.height,
+          );
+          ctx.filter = "none";
+        } else {
+          ctx.fillStyle = customCarColor;
+          ctx.fillRect(-car.width / 2, -car.height / 2, car.width, car.height);
+        }
+        ctx.restore();
+      }
+
+      // --- Main Loop ---
+      function loop(currentTime) {
+        let dt = (currentTime - lastTime) / 1000;
+        lastTime = currentTime;
+        updateCamera();
+        dt = Math.min(dt, 0.1);
+
+        // Clear screen with background color
+        ctx.fillStyle = "#1a1a1a"; // Dark gray background
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Draw tire marks from tire canvas
+        ctx.drawImage(tireCanvas, -camera.x, -camera.y);
+        if (!tireToggle.checked) {
+          tireCtx.clearRect(0, 0, tireCanvas.width, tireCanvas.height);
+        }
+        // Draw obstacles
+        drawObstacles();
+
+        // Update and draw the car
+        updateCar(dt);
+        drawCar();
+        drawOtherPlayers();
+        requestAnimationFrame(loop);
+      }
+
+      requestAnimationFrame(loop);
+
+      // Multiplayer: handling other players
+      const otherPlayers = {};
+      socket.on("carUpdate", (data) => {
+        if (data.id === socket.id) return;
+        const existing = otherPlayers[data.id] || {};
+        otherPlayers[data.id] = {
+          ...existing,
+          ...data,
+          lastX: existing.x ?? data.x,
+          lastY: existing.y ?? data.y,
+          lastAngle: existing.angle ?? data.angle,
+        };
+      });
+
+      socket.on("playerDisconnected", (data) => {
+        delete otherPlayers[data.id];
+      });
+      function drawOtherPlayers() {
+        const viewLeft = camera.x - 100;
+        const viewRight = camera.x + canvas.width / dpr + 100;
+        const viewTop = camera.y - 100;
+        const viewBottom = camera.y + canvas.height / dpr + 100;
+        for (const id in otherPlayers) {
+          const p = otherPlayers[id];
+          if (
+            p.x + 40 > viewLeft &&
+            p.x - 40 < viewRight &&
+            p.y + 20 > viewTop &&
+            p.y - 20 < viewBottom
+          ) {
+            ctx.save();
+            ctx.translate(p.x - camera.x, p.y - camera.y);
+            ctx.rotate(p.angle);
+            if (carTexture.complete) {
+              const otherHue = p.customCarHue || 20;
+              ctx.filter = `hue-rotate(${otherHue}deg)`;
+              ctx.drawImage(
+                carTexture,
+                -car.width / 2,
+                -car.height / 2,
+                car.width,
+                car.height,
+              );
+              ctx.filter = "none";
+            } else {
+              const otherColor = p.customCarColor || "hsl(20, 80%, 50%)";
+              ctx.fillStyle = otherColor;
+              ctx.fillRect(
+                -car.width / 2,
+                -car.height / 2,
+                car.width,
+                car.height,
+              );
+            }
+            ctx.restore();
+          }
+        }
+      }
+
+      function drawOtherTireMarks() {
+        const segmentStep = 2; // Distance between sub-segments
+
+        for (const id in otherPlayers) {
+          const p = otherPlayers[id];
+
+          if (p.lastX == null || p.lastY == null || p.lastAngle == null) {
+            p.lastX = p.x;
+            p.lastY = p.y;
+            p.lastAngle = p.angle;
+            continue;
+          }
+
+          const dx = p.x - p.lastX;
+          const dy = p.y - p.lastY;
+          const distance = Math.hypot(dx, dy);
+
+          const vAngle = Math.atan2(dy, dx);
+          const driftAngle = Math.abs(
+            ((vAngle - p.angle + Math.PI) % (2 * Math.PI)) - Math.PI,
+          );
+          const driftAngleThreshold = (10 * Math.PI) / 180;
+
+          if (distance >= 1 && driftAngle >= driftAngleThreshold) {
+            const steps = Math.ceil(distance / segmentStep);
+
+            for (let i = 0; i < steps; i++) {
+              const t1 = i / steps;
+              const t2 = (i + 1) / steps;
+
+              const interp = (t) => {
+                const x = p.lastX + dx * t;
+                const y = p.lastY + dy * t;
+                const angle = p.lastAngle + (p.angle - p.lastAngle) * t;
+
+                const cos = Math.cos(angle);
+                const sin = Math.sin(angle);
+                const rearY = car.height / 2;
+                const halfW = car.width / 2 - 3;
+
+                return {
+                  left: {
+                    x: x - halfW * cos + rearY * sin,
+                    y: y - halfW * sin - rearY * cos,
+                  },
+                  right: {
+                    x: x + halfW * cos + rearY * sin,
+                    y: y + halfW * sin - rearY * cos,
+                  },
+                };
+              };
+
+              const pt1 = interp(t1);
+              const pt2 = interp(t2);
+
+              tireCtx.strokeStyle = "rgba(100, 100, 100, 0.35)";
+              tireCtx.lineWidth = 2;
+              tireCtx.lineCap = "round";
+
+              // Left tire line segment
+              tireCtx.beginPath();
+              tireCtx.moveTo(pt1.left.x, pt1.left.y);
+              tireCtx.lineTo(pt2.left.x, pt2.left.y);
+              tireCtx.stroke();
+
+              // Right tire line segment
+              tireCtx.beginPath();
+              tireCtx.moveTo(pt1.right.x, pt1.right.y);
+              tireCtx.lineTo(pt2.right.x, pt2.right.y);
+              tireCtx.stroke();
+            }
+          }
+
+          p.lastX = p.x;
+          p.lastY = p.y;
+          p.lastAngle = p.angle;
+        }
+      }
+    </script>
+  </body>
+</html>
